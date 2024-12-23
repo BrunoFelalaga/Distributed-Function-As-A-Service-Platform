@@ -1,0 +1,11 @@
+fastapi==0.95.2     # For building the FastAPI application
+uvicorn==0.22.0     # ASGI server to run the FastAPI app
+redis==5.2.0        # Python client for Redis
+pyzmq==25.0.2 --no-binary pyzmq  # Python bindings for ZeroMQ
+dill==0.3.7         # Serialization library
+requests==2.31.0    # For making HTTP requests
+pytest==8.3.3       # For testing the application
+httpx==0.24.1       # For HTTP testing in FastAPI
+matplotlib==3.9.0   # For plottin
+python-dateutil==2.8.2
+psutil==5.9.0
