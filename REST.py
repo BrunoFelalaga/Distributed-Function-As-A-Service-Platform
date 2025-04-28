@@ -145,7 +145,7 @@ async def get_result(task_id: str):
 
     # Serialize the result or the exception before returning
     result = serialize(task_data.get('result', 'No result available'))
-    print(task_data['status'], "\nfff\n")
+   
     return TaskResultRep(task_id=task_id, status=task_data['status'], result=result)
 
 if __name__ == "__main__":

@@ -1,327 +1,246 @@
-# Function As A Service
+# Function As A Service (FaaS) Platform
 
-## MODELS
-We have 3 models that execute all tasks put by the service in the redisDB. 
-- Local dispatcher model
-- Push model
-- Pull model
+A distributed system for executing Python functions in a serverless environment, optimized for performance with multiple execution models.
 
-# Setup
-Install python dependencies to get started
+
+## Architecture Overview
+
+This FaaS platform consists of three main components:
+1. **REST API Service**: FastAPI-based service for registering and executing functions
+2. **Redis**: Used as both a key-value store and message broker
+3. **Task Dispatchers and Workers**: Distribute and execute tasks using various models
+
+### Redis Usage
+
+Redis serves dual purposes:
+
+1. **Key-Value Store**:
+   - Storing registered functions and their metadata
+   - Maintaining task state throughout execution lifecycle
+   - Persisting execution results
+
+2. **Message Broker**:
+   - Notifying dispatchers of new tasks via publish/subscribe
+   - Decoupling task creation from execution
+
+## Setup
+
+### Prerequisites
+
+- Python 3.x
+- Redis server
+- Required Python packages
+
+### Installation
 
 ```bash
-pip install -r requirements.txt -q -U  # installs all requirements in the requirements.txt file
-```
-Make sure the redis server, fastapi server are setup before running the dispatchers and their corresponding workers or the testing scripts.
-See the configuration guide at the bottom of the page for how to set up sessions for the servers and terminals
-
-Each of the models perform task execution by dispatcher getting tasks from RedisDB.
-
-Run a model dispatcher with this command. Select one of push, pull and local with -m and set the dispatcher port and number of workers. 
-
-
-```bash
-> python3 task_dispatcher.py -m [local/push/pull] -p <port> -w <num_worker_processors>
-```
-
-
-Also run a push/pull worker with these commands
-```bash
-> python3 pull_worker.py <num_worker_processors> <dispatcher url>
-> python3 push_worker.py <num_worker_processors> <dispatcher url>
-```
-
-# Instructions for running webservice and performance tests
-There are 5 testing scripts.  
-The following show how to run each of them for webservice and performance testing
-
-## WEBSERVICE TESTING
-
-### Run webservice tests for push
-
-1. Clear the jobs currently running as well as all data stored in the redis db
-Kill all workers and dispatchers and flush redisdb
-```bash
-redis-cli flushall # in the redis cli session
+# Install dependencies
+pip install -r requirements.txt -q -U
 ```
 
-2. start a dispatcher in the tmux dispatcher session
+## Execution Models
+
+The platform supports three execution models:
+
+1. **Local Dispatcher**: 
+   - Baseline implementation using Python's MultiProcessingPool
+   - Tasks executed directly in the dispatcher process
+   - No network communication overhead
+   - Simple but limited to a single machine
+   - Useful for development and testing
+
+2. **Push Model (DEALER/ROUTER)**:
+   - Dispatcher actively pushes tasks to available workers
+   - Uses ZMQ's DEALER/ROUTER pattern for asynchronous communication
+   - Worker registration with heartbeat mechanism
+   - Better load balancing with active task distribution
+   - Fault detection through heartbeats
+   - Higher throughput for CPU-intensive workloads
+
+3. **Pull Model (REQ/REP)**:
+   - Workers request tasks when they're free
+   - Uses ZMQ's REQ/REP pattern for synchronous request-response
+   - Self-regulating flow control (workers only request when ready)
+   - Simpler implementation with fewer moving parts
+   - Better for heterogeneous worker clusters
+   - Deadline-based fault detection
+
+## Running the System
+
+### 1. Start the Redis Server
+
 ```bash
-python3 task_dispatcher.py -m push # in a dispatcher tmux session
+redis-server
 ```
 
-3. Start a new worker(s) in the tmux worker session
-  Before running the pytests make sure there to have a worker running
+### 2. Start the FastAPI Service
+
 ```bash
-python3 push_model/push_worker.py <num_processes> <dispatcher_url> 
+uvicorn REST:app --reload
+```
+
+### 3. Start a Task Dispatcher
+
+```bash
+python3 task_dispatcher.py -m [local|push|pull] -p <port> -w <num_worker_processors>
+```
+
+### 4. Start Workers (for push/pull models)
+
+```bash
+# For pull model
+python3 pull_model/pull_worker.py <num_processes> <dispatcher_url>
+
+# For push model
+python3 push_model/push_worker.py <num_processes> <dispatcher_url>
+
+# Example
 python3 push_model/push_worker.py 4 tcp://127.0.0.1:5556
 ```
 
-4. run this in the redis tmux session
+## Testing
+
+### Web Service Testing
+
+The platform includes test suites for each execution model.
+
+#### Push Model Testing
+
 ```bash
+# 1. Clear Redis data
+redis-cli flushall
+
+# 2. Start push dispatcher
+python3 task_dispatcher.py -m push
+
+# 3. Start push worker(s)
+python3 push_model/push_worker.py 4 tcp://127.0.0.1:5556
+
+# 4. Run tests
 pytest -s test_webservice_push.py
 ```
 
+#### Pull Model Testing
 
-### Run webservice tests for pull
-
-1. Clear the jobs currently running as well as all data stored in the redis db
-Kill all workers and dispatchers and flush redisdb
 ```bash
-redis-cli flushall # in the redis cli session
-```
+# 1. Clear Redis data
+redis-cli flushall
 
-2. start a dispatcher in the tmux dispatcher session
-```bash
-python3 task_dispatcher.py -m pull # in a dispatcher tmux session
-```
+# 2. Start pull dispatcher
+python3 task_dispatcher.py -m pull
 
-3. Start a new worker(s) in the tmux worker session
-```bash
-python3 pull_model/pull_worker.py <num_processes> <dispatcher_url> 
+# 3. Start pull worker(s)
 python3 pull_model/pull_worker.py 4 tcp://127.0.0.1:5556
-```
 
-4. run this in the redis tmux session
-```bash
+# 4. Run tests
 pytest -s test_webservice_pull.py
 ```
 
+#### Local Model Testing
 
-### Run webservice tests for local
-1. Run local dispatcher before webservice test
 ```bash
+# 1. Start local dispatcher
 python3 task_dispatcher.py -m local
-```
 
-2. 
-```bash
+# 2. Run tests
 pytest -s test_webservice_local.py
 ```
 
+### Performance Testing
 
-# PERFORMANCE TESTING
+Performance tests evaluate throughput, latency, and scalability of each model.
 
-Select a configuration for for workers and also tasks. The main block contains commented configurations 
-that can be uncommented to run for weak scaling and load testing or edited for other configgurations -- see other configuration functions in the script. 
-
-All plots will be saved to "./testing_plots/comparative"
-
-### Run performance tests for local
-
-1. Run a local dispatcher before running the performance test
 ```bash
+# Local model testing
 python3 task_dispatcher.py -m local &
-```
-2. 
-```bash
 python3 test_local_dispatcher_performance.py
-```
 
-
-### Run performance tests for pull
-1.  Run a pull dispatcher before running the performance test
-```bash
+# Pull model testing
 python3 task_dispatcher.py -m pull &
-```
-
-2. 
-```bash
 python3 test_push_pull_performance.py -m pull
-```
 
-### Run performance tests for push
-1. Run a push dispatcher before running the performance test
-```bash
+# Push model testing
 python3 task_dispatcher.py -m push &
-```
-
-2.
-```bash
 python3 test_push_pull_performance.py -m push
 ```
-### LEARNING For future improvements:
-We could have done a class model for tests instead of recreating the tests multiple times. 
-We could have made instances of local, pull, and push models.
 
-Similarly, for performance testing, we could have build a class for performance testing 
-and built instances of local, push, and pull models to demonstrate performance.
+All performance test results are saved to `./testing_plots/comparative`.
 
-The -w command for starting the task_dispatcher could be improved/implemented to start the workers for all the dispatchers in the task_dispatcher.py script. 
-This would simply spin the corresponding worker for the specified dispatcher. Not implemented in due to time.
+## Development Notes
 
+- `my_faas_client.py`: Client library for interacting with the service
+- `custom_exceptions.py`: Exception classes for error handling
+- `serialize.py`: Serialization/deserialization utilities
+- `test_functions.py`: Test functions used in the test suite
 
-### HELPER SCRIPTS
-- my_faas_client.py : sets up client to talk to service. The testing scripts for perfomance import this file to run tests on service
+## Operations Guide
 
-- custom_exceptions.py : contains the exceptions we have for communicating failures to client
-- serialize.py : has the serialize/deserialize functions
-- test_functions.py : contains custom functions for testing the service with pytests
+### Session Management with tmux
 
-
-# CONFIGURATION GUIDE
-
-## REDIS
-$ brew install redis
-this might take 5 minutes
-
-start in background
-$ brew services start redis
-
-when running, should show:
-redis (homebrew.mxcl.redis)
-Running: ✔
-Loaded: ✔
-User: {usename}
-PID: {67975}
-
-stop redis
-$ brew services stop redis
-
-test if running
-$ redis-cli
-should return the local host for you to type
-
-test using PING command
-$ 127.0.0.1:6379> ping
-Should receive back $ PONG
-
-test register func script
--- to test use testing_and_reports/test_register.py
--- PORT: 7777
-
-## ZMQ
+#### Redis Session
 ```bash
-$ pip install pyzmq
-this might take 1-2 mins
-```
+# Create session
+tmux new-session -s redis
 
+# Run Redis
+redis-server &
 
-## Commands for Managing Sessions
-
-Command order to set up and manage tmux sessions.
-
----
-
-### Redis Session
-- Start a new `tmux` session for Redis:
-  ```bash
-  tmux new-session -s redis
-  ```
-- Run Redis in the background:
-  ```bash
-  redis-server &
-  ```
-
-- Run tests in the Redis session:
-  ```bash
-  python3 test_webservice_[push/pull/local].py
-  ```
-
-- Kill the Redis session:
-  ```bash
-  tmux kill-session -t redis
-  ```
-- Clear all data in Redis:
-  ```bash
-  redis-cli flushall
-  ```
-
----
-
-### FastAPI Session
-- Start a new `tmux` session for FastAPI:
-  ```bash
-  tmux new-session -s fastapi
-  ```
-- Start the FastAPI server:
-  ```bash
-  uvicorn REST:app --reload
-  ```
-- Kill the FastAPI session:
-  ```bash
-  tmux kill-session -t fastapi
-  ```
-
----
-
-### Dispatcher Session
-- Start a new `tmux` session for the dispatcher:
-  ```bash
-  tmux new-session -s dispatcher
-  ```
-- Run the dispatcher:
-  ```bash
-  python3 task_dispatcher.py -m [local/push/pull] -p <port number> -w <num workers>
-  ```
-- Kill the dispatcher session:
-  ```bash
-  tmux kill-session -t dispatcher
-  ```
-
----
-
-### Client Testing (Run Last)
-Run this command in the Redis session after all other sessions are set up:
-```bash
+# Run tests
 python3 test_webservice_[push/pull/local].py
+
+# Kill session
+tmux kill-session -t redis
+
+# Clear Redis data
+redis-cli flushall
 ```
 
----
+#### FastAPI Session
+```bash
+# Create session
+tmux new-session -s fastapi
 
-## TMUX Common Commands
-- See all active tmux sessions:
-  ```bash
-  tmux ls
-  ```
-- Start a new tmux session:
-  ```bash
-  tmux new-session -s <session_name>
-  ```
-- Detach from a session:
-  ```
-  Ctrl+B, then D
-  ```
-- Reattach to a session after detaching:
-  ```bash
-  tmux attach-session -t <session_name>
-  ```
-- Kill a session:
-  ```bash
-  tmux kill-session -t <session_name>
-  ```
+# Start server
+uvicorn REST:app --reload
 
----
+# Kill session
+tmux kill-session -t fastapi
+```
 
-### Scrolling Terminal in a tmux Session
-- Enter scroll mode:
-  ```
-  Ctrl+B, then [
-  ```
-- Scroll with arrow keys
-- Press `q` to quit scrolling
+#### Dispatcher Session
+```bash
+# Create session
+tmux new-session -s dispatcher
 
----
+# Run dispatcher
+python3 task_dispatcher.py -m [local/push/pull] -p <port> -w <num_workers>
 
-# Debugging Commands
-- List running tmux processes:
-  ```bash
-  tmux ls
-  ```
-- Kill a running script by filename:
-  ```bash
-  pkill -f <file_name>
-  ```
-- See all processes running with a name/PID/etc.:
-  ```bash
-  ps aux | grep <process_name/PID/etc.>
-  ```
-- Find which processes/PIDs are on a port:
-  ```bash
-  lsof -i :<port_num>
-  ```
-- Kill a process by PID:
-  ```bash
-  kill -9 <PID>
-  ```
+# Kill session
+tmux kill-session -t dispatcher
+```
+
+### tmux Common Commands
+
+| Command | Description |
+|---------|-------------|
+| `tmux ls` | List sessions |
+| `tmux new-session -s <name>` | Create new session |
+| `Ctrl+B, D` | Detach from session |
+| `tmux attach-session -t <name>` | Reattach to session |
+| `tmux kill-session -t <name>` | Kill session |
+| `Ctrl+B, [` | Enter scroll mode (use arrow keys to scroll) |
+| `q` | Exit scroll mode |
+
+### Debugging Commands
+
+| Command | Description |
+|---------|-------------|
+| `ps aux \| grep <process>` | Find processes by name |
+| `lsof -i :<port>` | Find processes using a port |
+| `kill -9 <PID>` | Force kill a process |
+| `pkill -f <filename>` | Kill processes by script name |
+
+
+
+
 

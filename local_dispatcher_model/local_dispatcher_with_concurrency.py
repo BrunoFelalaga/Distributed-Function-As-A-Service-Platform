@@ -6,7 +6,8 @@ import logging
 
 # sys.path to import serialize
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
-from serialize import serialize, deserialize, deserialize_registration
+# from serialize import serialize, deserialize, deserialize_registration
+from serialize import serialize, deserialize #, deserialize_registration
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -22,8 +23,10 @@ def execute_task(task_id, fn_payload, param_payload):
 
     # Deserialize the function and the parameters
     try:
-        function = deserialize_registration(fn_payload)
-        param_payload_deserialized = deserialize_registration(param_payload)
+        # function = deserialize_registration(fn_payload)
+        # param_payload_deserialized = deserialize_registration(param_payload)
+        function = deserialize(fn_payload)
+        param_payload_deserialized = deserialize(param_payload)
 
         # Execute function with parameters
         if isinstance(param_payload_deserialized, (tuple, list)):
