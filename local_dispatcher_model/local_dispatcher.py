@@ -9,19 +9,21 @@ from custom_exceptions import *
 
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
+# Execute task by unacking arguments from parameter payload into function(from function payload)
 def execute_task(task_id, fn_payload, param_payload):
     print(f"EXECUTING TASK: {task_id}")
     try:
         function = deserialize(fn_payload)
         params = deserialize(param_payload)
         
-        if isinstance(params, tuple):
-            if len(params) == 2 and isinstance(params[1], dict):
+        # Check collection type
+        if isinstance(params, tuple): 
+            if len(params) == 2 and isinstance(params[1], dict): # arg and kwarg in (_, dict)
                 args, kwargs = params
                 result = function(*args, **kwargs)
-            else:
+            else: # just args
                 result = function(*params)
-        elif isinstance(params, (list, set)):
+        elif isinstance(params, (list, set)): # 
             result = function(*params)
         else:
             result = function(params)
@@ -36,8 +38,18 @@ def execute_task(task_id, fn_payload, param_payload):
 
     return task_id, status, serialize(result)
 
+# NOTE: 
+# Each Redis PubSub client processes messages independently at their own pace and exactly once by get_message()
+# Once retrieved, a message is considered "consumed" by that client
+# Multiple clients can all receive the same messages independently
+# This is different from a traditional message queue where messages are consumed globally when processed by any consumer.
 def local_dispatcher():
-    pubsub = redis_client.pubsub()
+    """
+    Concurrently execute tasks in the task queue using a multiprocessing pool.
+    """
+
+    # Get pubsub client obj and subscribe to Tasks channels
+    pubsub = redis_client.pubsub() 
     pubsub.subscribe("Tasks")
     print("LOCAL DISPATCHER STARTED")
     
@@ -45,23 +57,27 @@ def local_dispatcher():
     
     with Pool(processes=4) as pool:
         while True:
-            message = pubsub.get_message()
+
+            # Check PubSub for messages and process tasks in Redis
+            message = pubsub.get_message() 
             if message and message['type'] == 'message':
                 task_id = message['data'].decode('utf-8')
                 print(f"NEW TASK RECEIVED: {task_id}")
                 
-                if task_id not in tasks_in_progress:
+                # Place tasks in Redis as RUNNING and set worker pool to execute them
+                if task_id not in tasks_in_progress:# Only process if not already in progress
                     task_data = deserialize(redis_client.get(task_id))
                     task_data['status'] = "RUNNING"
                     redis_client.set(task_id, serialize(task_data))
                     print(f"STATUS: RUNNING for task {task_id}")
                     
-                    future = pool.apply_async(
+                    future = pool.apply_async(  # worker pool to execute
                         execute_task,
                         (task_id, task_data['fn_payload'], task_data['param_payload'])
                     )
-                    tasks_in_progress.add((task_id, future))
+                    tasks_in_progress.add((task_id, future)) # Track task and its future
             
+            # Check for tasks(futures) in progress that are ready and  update Redis with the results
             for task_id, future in list(tasks_in_progress):
                 if future.ready():
                     try:
@@ -73,10 +89,11 @@ def local_dispatcher():
                         redis_client.set(task_id, serialize(task_data))
                         print(f"RESULT STORED - Task: {task_id}, Status: {status}")
                         tasks_in_progress.remove((task_id, future))
-                    except Exception as e:
+
+                    except Exception as e: # Handle Errors
                         print(f"ERROR HANDLING RESULT - Task: {task_id}, Error: {str(e)}")
             
-            time.sleep(0.1)
+            time.sleep(0.1) # Short sleep to prevent CPU overuse and resume 
 
 if __name__ == "__main__":
     local_dispatcher()

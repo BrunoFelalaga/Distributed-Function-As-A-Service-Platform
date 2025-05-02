@@ -22,7 +22,7 @@ logging.basicConfig(filename='./logs/pull_dispatcher.log',
                     level=logging.DEBUG)
 
 
-# Locks
+# Locks -- used exclusively by worker_communication_habdler thread
 socket_lock = threading.Lock()  # For socket operations
 task_lock = threading.Lock()    # For task queue operations 
 redis_lock = threading.Lock()   # For Redis operations
@@ -39,14 +39,21 @@ redis_client = redis.Redis(host='localhost', port=6379, db=0)
 context = zmq.Context()
 
 def log_and_print(message, level=logging.INFO):
-    """Logs a message and optionally prints it to the console."""
+    """
+    Logs a message and optionally prints it to the console.
+    Used for unified logging and debugging.
+    """
     logging.log(level, message)
     if level in (logging.DEBUG, logging.WARNING, 
                  logging.ERROR, logging.CRITICAL):
         print(message)
 
 def task_listener():
-    """Thread to listen for new tasks from Redis."""
+    """
+    Thread to listen for new tasks published to the Redis "Tasks" channel.
+    Adds valid tasks to the task queue for processing.
+    """
+
     # Create a pubsub object to subscribe to Redis Tasks channels
     pubsub = redis_client.pubsub()
     pubsub.subscribe("Tasks")
@@ -59,7 +66,7 @@ def task_listener():
 
             task_id = task_message['data'].decode('utf-8')
             task_data_serialized = redis_client.get(task_id)
-            if not task_data_serialized:  # Check if task data is missing
+            if not task_data_serialized:  # Check if task data is missing and log WARNING
                 log_and_print(f"\nInvalid task data for task {task_id}\n", logging.WARNING)
                 continue
 
@@ -75,11 +82,13 @@ def task_listener():
 
 
 def worker_communication_handler():
-    """ZMQ REP Thread to communicate with workers, register them, assign tasks and get their results
-        Uses locks for every message sending on socket
+    """
+    ZMQ.REP Thread to handle communication between dispatcher and workers
+        -  register them, assign tasks and get their results
+    Gets priority for all locks available to the dispatcher
     """
     
-    try: # create socket and bind to port where workers will be communicating at
+    try: # create socket and bind to port where workers will be communicating through
         socket = context.socket(zmq.REP)
         socket.bind("tcp://*:5556")
     except (zmq.ZMQError, Exception) as e:
@@ -90,7 +99,7 @@ def worker_communication_handler():
         try:
             message = socket.recv_string()  # No lock needed for basic recv
             
-            # Proce task requests
+            # Process task requests
             if message == "REQUEST_TASK":
                 log_and_print("REQUEST_TASK received from worker", logging.DEBUG)
                 try:
@@ -129,7 +138,8 @@ def worker_communication_handler():
                         if redis_task_data_serialized:
                             redis_task_data = deserialize(redis_task_data_serialized)
 
-                             # Only update if the task is running, any other update would conflict with previous status because task could only have been FAILED or COMPLETED
+                             # Only update if the task is running, any other update would conflict with previous status because task could only have been FAILED or COMPLETED, 
+                             #  status cannot be QUEUED since WORKER assignment would have changed it to RUNNING befor assignment 
                             if redis_task_data['status'] == 'RUNNING':
                                 result = serialize(serialize(result_data['result']))
                                 task_data = {"task_id": task_id,
@@ -138,7 +148,7 @@ def worker_communication_handler():
                                 redis_client.set(task_id, serialize(result_data))
                                 result_print_message = f"\nWorker returned Task {task_id} with status: {status}\n"
                                 log_type = logging.DEBUG
-                            else: # If job is not running then we ignore the result
+                            else: # If job is not running then we ignore the result -- might have already been COMPLETED OR FAILED
                                 result_print_message = f"\nTask {task_id} was already marked as {redis_task_data['status']}. Ignoring result.\n"
                                 log_type = logging.WARNING
 
@@ -166,7 +176,10 @@ def worker_communication_handler():
 
 
 def check_task_timeouts():
-    """Thread to periodically check for tasks that have exceeded the deadline."""
+    """
+    Thread to periodically check for tasks that have exceeded the deadline.
+    marks them as FAILED
+    """
     while True:
         failed_tasks = {}  # Dictionary to store tasks that have timed out
 
@@ -210,6 +223,10 @@ def check_task_timeouts():
 
         
 if __name__ == "__main__":
+    """
+    Main entry point for the Pull Dispatcher.
+    Starts threads for task listening, worker communication, and task timeout monitoring.
+    """
     # :> ./logs/pull_dispatcher.log && python3 pull_model/pull_dispatcher.py
     
     # Log that the Pull Dispatcher has started

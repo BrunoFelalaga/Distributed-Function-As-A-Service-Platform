@@ -31,7 +31,7 @@ logging.info(f"Worker starting initialization")
 logging.info(f"Number of processes: ")
 
 # Lock to ensure synchronized access to the socket
-lock = threading.Lock()  
+socket_lock = threading.Lock()  
 
 
 
@@ -113,7 +113,7 @@ def pull_worker(dispatcher_url, num_processes):
         while True: # Request new tasks if there is available capacity
             if len(running_tasks) < num_processes: # check capacity
                 try: 
-                    with lock: # Request a task from the dispatcher with lock
+                    with socket_lock: # Request a task from the dispatcher with lock
                         socket.send_string("REQUEST_TASK")
                         message = socket.recv()
                     
@@ -122,7 +122,7 @@ def pull_worker(dispatcher_url, num_processes):
                         task = deserialize(message)  # Deserialize the task data
                         task_id = task['task_id']
                         
-                        # Submit the task to the process pool
+                        # Submit the task to the process pool and get an AsyncResult obj (effectively Python's multiprocessing equivalent of a future or promise)
                         running_tasks[task_id] = pool.apply_async(  execute_fn, 
                                                                     (task_id, task['fn_payload'], task['param_payload']))
                         log_and_print(f"Started task {task_id}")
@@ -138,7 +138,7 @@ def pull_worker(dispatcher_url, num_processes):
 
                     try: # Get the result from the task
                         status, result_payload_serial = task.get(timeout=0)  # Non-blocking
-                        with lock: # Send the result back to the dispatcher with lock
+                        with socket_lock: # Send the result back to the dispatcher with lock
                             result_message = f"RESULT:{result_payload_serial}"
                             socket.send_string(result_message)
                             ack = socket.recv_string()
@@ -151,6 +151,7 @@ def pull_worker(dispatcher_url, num_processes):
                     except Exception as e: # Log errors while handling task results and remove from completed tasks
                         log_and_print(f"Error handling result for task {task_id}: {e}\n", logging.ERROR)
                         completed_tasks.append(task_id) 
+                        # NOTE: seems unintuitive to append to completed_tasks but this marks it as done so it is later removed from running_tasks to free up capacity
 
             # Remove tasks that have been completed from running tasks
             for task_id in completed_tasks:

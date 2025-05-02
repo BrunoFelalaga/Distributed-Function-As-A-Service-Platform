@@ -73,6 +73,10 @@ async def register_function(regRequest: RegisterFn):
     return RegisterFnRep(function_id=function_uuid)
 
 
+# NOTE:
+# Task is set in redis with status 'QUEUED' in this exec_fn then
+# Message is published to Redis pubsub with task_id to the 'Tasks' Channel 
+# Dispatchers subscribed to this channel are able to consume the message
 @app.post("/execute_function", response_model=ExecuteFnRep)
 async def execute_function(execRequest: ExecuteFnReq):
     # Retrieve function data from Redis and validate its existence
