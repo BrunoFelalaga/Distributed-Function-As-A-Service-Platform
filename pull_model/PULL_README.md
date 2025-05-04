@@ -1,59 +1,98 @@
-# Pull Model Dispatcher and Worker README
+# Pull Model Architecture Overview
 
-## Architecture Overview
+The pull model implementation consists of a dispatcher and worker components that communicate via ZMQ REQ/REP sockets. Workers actively request tasks from the dispatcher, which assigns tasks based on availability and tracks their execution.
 
-The pull model implementation consists of a dispatcher and worker components that communicate via ZMQ REQ/REP sockets. Workers request tasks from the dispatcher, execute them, and return results.
-
-## Core Components
-
-### Pull Dispatcher (`pull_dispatcher.py`)
-
-#### Locks
-- `socket_lock`: Prevents concurrent access to ZMQ socket, maintaining request/reply message integrity. Dispatcher and Workers grab lock so there is one user when resource is needed
-- `task_lock`: Guards the task queue against concurrent modification during task assignment. 
-- `redis_lock`: Ensures atomic updates to Redis database entries
-- `running_lock`: Protects the running tasks dictionary from concurrent modifications
-NOTE: worker_communication_handler fn uses these(but socket_lock) exclusively, hence has priority of resources
-
-
-#### Threads
-1. **Task Listener**: Subscribes to Redis "Tasks" channel to receive new tasks
-2. **Worker Communication Handler**: Processes worker requests and results via ZMQ
-3. **Task Timeout Checker**: Monitors task execution to enforce deadlines
-
-#### Configuration
-- `DEADLINE_SECONDS`: Maximum time allowed for task execution (default: 2s)
-
-### Pull Worker (`pull_worker.py`)
-
-#### Lock
-- `socket_lock`: Ensures thread-safe socket operations for task requests/results
-
-#### Functions
-- `execute_fn(task_id, ser_fn, ser_params)`: Deserializes and executes functions
-- `pull_worker(dispatcher_url, num_processes)`: Main worker function that manages the process pool
+The dispatcher listens for tasks via Redis pub/sub, maintains a task queue, and implements a deadline-based failure detection mechanism. Workers connect to the dispatcher, request tasks when they have capacity, and return results upon completion.
 
 ## Workflow
 
-1. Dispatcher listens for tasks via Redis pub/sub
-2. Workers connect to dispatcher and request tasks when capacity is available
-3. Dispatcher assigns tasks and tracks them with execution timestamps
-4. Workers execute tasks in their process pool and return results
-5. Tasks exceeding the deadline are marked as failed with appropriate error messages
+1. Dispatcher listens for new tasks from Redis pub/sub channel "Tasks"
+2. Workers connect to the dispatcher and request tasks when capacity is available
+3. Dispatcher assigns tasks, marks them as "RUNNING" in Redis, and tracks execution times
+4. Workers execute tasks in their process pool and send results back to the dispatcher
+5. Dispatcher updates Redis with task results and statuses
+6. Tasks exceeding the deadline are automatically marked as failed
 
-## Error Handling
+## Pull Dispatcher Overview
 
-- Serialization/deserialization errors are captured and reported
-- Function execution failures are returned to the client
-- Worker timeouts are detected and reported as `WorkerFailureError`
-- ZMQ communication errors are handled gracefully
+### Fault Tolerance
+The system implements robust fault tolerance through a deadline-based task monitoring mechanism. Tasks are tracked from the moment they're assigned, and those exceeding the configurable deadline (default: 2 seconds) are automatically marked as failed with appropriate error information. This approach ensures the system doesn't hang indefinitely waiting for unresponsive workers or problematic tasks.
 
-## Starting the System
+### Task Lifecycle Management
+- Tasks progress through states: QUEUED → RUNNING → COMPLETED/FAILED
+- Each state transition is recorded in Redis
+- Task execution times are tracked for deadline enforcement
 
-```bash
-# Start the dispatcher
-python3 pull_dispatcher.py
+### Thread Architecture
+1. **Task Listener Thread**:
+   - Subscribes to Redis "Tasks" channel
+   - Processes incoming task messages
+   - Adds valid tasks to the task queue
 
-# Start a worker with N processes connected to dispatcher URL
-python3 pull_worker.py <num_processes> tcp://localhost:5556
-```
+2. **Worker Communication Handler Thread**:
+   - Handles worker requests via ZMQ REP socket
+   - Assigns tasks from queue to requesting workers
+   - Processes task results from workers
+   - Updates Redis with task statuses and results
+
+3. **Task Timeout Checker Thread**:
+   - Periodically scans running tasks
+   - Identifies tasks exceeding the deadline
+   - Creates WorkerFailureError for timed-out tasks
+   - Updates Redis with failure information
+
+### Synchronization Mechanisms
+- `socket_lock`: Ensures thread-safe ZMQ socket operations
+- `task_lock`: Guards task queue during assignments
+- `redis_lock`: Protects Redis operations from race conditions
+- `running_lock`: Safeguards running_tasks dictionary updates
+
+### Key Data Structures
+- `task_queue`: Thread-safe queue for pending tasks
+- `running_tasks`: Dictionary tracking task execution times
+
+## Pull Worker Overview
+
+### Key Functions
+- Requests tasks from dispatcher when capacity is available
+- Maintains a process pool for concurrent task execution
+- Tracks running tasks and reports results
+- Handles various error conditions during execution
+
+### Task Execution Process
+- `execute_fn` deserializes function and parameters
+- Dynamically determines function calling convention based on parameter type
+- Categorizes and handles different types of errors
+- Returns serialized results with appropriate status
+
+### Communication Pattern
+- Uses ZMQ REQ/REP pattern for task requests and result delivery
+- Implements thread-safe socket access via locks
+- Handles timeouts and communication errors gracefully
+
+### Concurrency Model
+- Maintains a configurable pool of worker processes
+- Tracks running tasks to prevent exceeding capacity
+- Asynchronously collects and reports task results
+
+### Error Handling
+- Categorizes errors (serialization, execution, memory)
+- Properly serializes exceptions for client reporting
+- Maintains worker stability despite task failures
+
+## Implementation Details
+
+### Locks
+To ensure thread safety, the dispatcher uses multiple locks:
+- `socket_lock`: Prevents concurrent socket operations
+- `task_lock`: Protects task queue integrity
+- `redis_lock`: Ensures atomic Redis updates
+- `running_lock`: Guards the running tasks dictionary
+
+The worker uses a single lock for socket operations to prevent message interleaving.
+
+### Socket Configuration
+The dispatcher binds a REP socket to port 5556, while workers connect via REQ sockets. This pattern ensures proper request-response pairing and simplifies message routing.
+
+### Task Monitoring
+Tasks are tracked with timestamps from assignment until completion. The timeout checker runs periodically to identify and mark failed tasks, keeping the system responsive even when workers crash or hang.

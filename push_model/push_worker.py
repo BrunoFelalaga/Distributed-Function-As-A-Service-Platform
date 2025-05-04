@@ -105,19 +105,19 @@ def push_worker(dispatcher_url_reg, dispatcher_url_task, dispatcher_url_result):
    context = zmq.Context()
 
    # Socket for worker registration and heartbeat (port 5555)
-   socket_reg = context.socket(zmq.DEALER)
-   socket_reg.identity = f"worker-{uuid.uuid4()}".encode()  # Give a unique identity to each worker
-   socket_reg.connect(dispatcher_url_reg)
+   registration_socket = context.socket(zmq.DEALER)
+   registration_socket.identity = f"worker-{uuid.uuid4()}".encode()  # Give a unique identity to each worker
+   registration_socket.connect(dispatcher_url_reg)
 
    # Socket for task assignment (port 5556)
-   socket_task = context.socket(zmq.DEALER)
-   socket_task.identity = socket_reg.identity  # Use the same identity for consistency
-   socket_task.connect(dispatcher_url_task)
+   task_socket = context.socket(zmq.DEALER)
+   task_socket.identity = registration_socket.identity  # Use the same identity for consistency
+   task_socket.connect(dispatcher_url_task)
 
    # Socket for sending results (port 5557)
-   socket_result = context.socket(zmq.DEALER)
-   socket_result.identity = socket_reg.identity  # Use the same identity for consistency
-   socket_result.connect(dispatcher_url_result)
+   result_socket = context.socket(zmq.DEALER)
+   result_socket.identity = registration_socket.identity  # Use the same identity for consistency
+   result_socket.connect(dispatcher_url_result)
 
    log_and_print(f"\nWorker connected to dispatcher at {dispatcher_url_reg}, \
                  {dispatcher_url_task}, {dispatcher_url_result}\n", logging.DEBUG)
@@ -125,25 +125,28 @@ def push_worker(dispatcher_url_reg, dispatcher_url_task, dispatcher_url_result):
    # Register with the dispatcher as ready
    def send_ready():
        ready_msg = { "type": "READY", "capacity": num_processes }
-       socket_reg.send_multipart([b"", serialize(ready_msg).encode()])
-       log_and_print(f"\nWorker {socket_reg.identity.decode()} sending READY with capacity {num_processes}\n", logging.DEBUG)
+       registration_socket.send_multipart([b"", serialize(ready_msg).encode()])
+       log_and_print(f"\nWorker {registration_socket.identity.decode()} sending READY with capacity {num_processes}\n", logging.DEBUG)
 
    send_ready()
 
    # Start the heartbeat thread
    def send_heartbeat():
+       """Thread to send heartbeat to dispatcher at every HEARTBEAT_INTERVAL
+            heartbeat also contains information on idle capacity of worker
+       """
        test_hb = 0
        while True:
            time.sleep(HEARTBEAT_INTERVAL)  # Send a heartbeat every HEARTBEAT_INTERVAL seconds
            heartbeat_msg = { "type": "HEARTBEAT",
-                            "capacity": num_processes - len(running_tasks)}
-           socket_reg.send_multipart([b"", serialize(heartbeat_msg).encode()])
+                            "capacity": num_processes - len(running_tasks)} # idle capacity
+           registration_socket.send_multipart([b"", serialize(heartbeat_msg).encode()])
 
            if test_hb == 0:
-               log_and_print(f"\nWorker {socket_reg.identity.decode()} sent HEARTBEAT\n", logging.DEBUG)
+               log_and_print(f"\nWorker {registration_socket.identity.decode()} sent HEARTBEAT\n", logging.DEBUG)
                test_hb += 1
            else:
-               log_and_print(f"\nWorker {socket_reg.identity.decode()} sent HEARTBEAT\n", logging.INFO)
+               log_and_print(f"\nWorker {registration_socket.identity.decode()} sent HEARTBEAT\n", logging.INFO)
 
    heartbeat_thread = threading.Thread(target=send_heartbeat, daemon=True)
    heartbeat_thread.start()
@@ -157,19 +160,23 @@ def push_worker(dispatcher_url_reg, dispatcher_url_task, dispatcher_url_result):
        def receive_and_process_tasks():
            while True:
                try:
-                   # Check completed tasks
+                   # Check for completed tasks and put them in results_queue and completed list
                    completed = []
                    for task_id, task in list(running_tasks.items()):
                        if task.ready():
                            try:
                                status, result_payload = task.get()
-                               result_queue.put((socket_result.identity, result_payload))
+                               result_queue.put((result_socket.identity, result_payload))
                                completed.append(task_id)
                                log_and_print(f"\nTask {task_id} completed with status {status}\n", logging.DEBUG)
+                           
+                           
                            except (FunctionExecutionFailure, SerializationError) as e:
+                                # Handle exceptions with getting tasks and place task into results_queue and completed list with status FAILED
+
                                 error_payload = serialize({ "task_id": task_id, "status": "FAILED", 
                                                                 "result": serialize(handle_task_failure(task_id, e))})
-                                result_queue.put((socket_result.identity, error_payload))
+                                result_queue.put((result_socket.identity, error_payload))
                                 completed.append(task_id)
                                 log_and_print(f"\nError handling task {task_id}: {e}\n", logging.ERROR)
 
@@ -178,11 +185,11 @@ def push_worker(dispatcher_url_reg, dispatcher_url_task, dispatcher_url_result):
                    for task_id in completed:
                        running_tasks.pop(task_id)
 
-                   # Only poll for new tasks if we have capacity
+                   # Poll for new tasks if worker has idle capacity and execute tasks with processing pool
                    if len(running_tasks) < num_processes:
-                       if socket_task.poll(1000):  # Poll with a timeout of 1 second
+                       if task_socket.poll(1000):  # Poll with a timeout of 1 second
                            log_and_print("\nWorker received a task message...\n", logging.DEBUG)
-                           message = socket_task.recv_multipart()
+                           message = task_socket.recv_multipart()
                            serialized_task = message[1]
                            task = deserialize(serialized_task)
 
@@ -190,11 +197,11 @@ def push_worker(dispatcher_url_reg, dispatcher_url_task, dispatcher_url_result):
                            fn_payload = task['fn_payload']
                            param_payload = task['param_payload']
 
-                           # Submit task to process pool
+                           # Submit task to asynchronous process pool 
                            async_result = pool.apply_async(
-                               execute_fn, 
-                               (task_id, fn_payload, param_payload)
-                           )
+                                                            execute_fn, 
+                                                            (task_id, fn_payload, param_payload)
+                                                        )
                            running_tasks[task_id] = async_result
                            log_and_print(f"\nSubmitted Task {task_id} to pool\n", logging.DEBUG)
 
@@ -211,7 +218,7 @@ def push_worker(dispatcher_url_reg, dispatcher_url_task, dispatcher_url_result):
                try:
                    # Get result from the queue and send it
                    identity, result_payload = result_queue.get()
-                   socket_result.send_multipart([identity, b"", result_payload.encode()])
+                   result_socket.send_multipart([identity, b"", result_payload.encode()])
                    log_and_print(f"\nWorker {identity.decode()} sent result back to dispatcher\n", logging.DEBUG)
                except Exception as e:
                    log_and_print(f"\nError while sending results: {e}\n", logging.ERROR)

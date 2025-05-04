@@ -41,10 +41,12 @@ def log_and_print(message, level=logging.INFO):
 global worker_tasks, worker_capacities, last_worker_heartbeat, dead_workers
 worker_tasks = {}  # Track current tasks assigned to each worker
 worker_capacities = {}  # Track maximum capacity of each worker
-available_workers = queue.Queue()  # Queue for managing available workers
-task_queue = queue.Queue()  # Queue for tasks that need to be assigned
 last_worker_heartbeat = {}  # Track the last heartbeat time for each worker
 dead_workers = set()  # Track workers that are considered dead
+
+available_workers = queue.Queue()  # Queue for managing available workers
+task_queue = queue.Queue()  # Queue for tasks that need to be assigned
+
 
 # Configurable maximum retries for tasks when workers fail
 MAX_RETRIES = 3
@@ -66,11 +68,14 @@ context = zmq.Context()
 
 
 def worker_registration_listener():
-   """Thread with socket for listening to workers and registering them"""
+   """Thread with socket for listening to workers and registering them
+      - Monitors worker health continuously and reassigns tasks for dead workers
+      - Listens for worker messages continuously to assign tasks and register heartbeats
+   """
    try:
        
-    socket = context.socket(zmq.ROUTER)
-    socket.bind("tcp://*:5555")
+    registration_socket = context.socket(zmq.ROUTER)
+    registration_socket.bind("tcp://*:5555")
    except zmq.ZMQError as e:
         log_and_print(f"\nSocket bind failed for port 5555: {e}\n", logging.ERROR)
         return
@@ -83,8 +88,7 @@ def worker_registration_listener():
     while True: # check worker last heartbeat times and see if they are dead by compring with the current time
         for worker_id, last_hb in list(last_worker_heartbeat.items()):
             curr_time = time.time()
-            if curr_time - last_hb > HEARTBEAT_TIMEOUT: 
-                # ------------------------------print(f"\n\nkkkooo000{curr_time , last_hb ,(curr_time - last_hb), HEARTBEAT_TIMEOUT}\n\n")
+            if curr_time - last_hb > HEARTBEAT_TIMEOUT: # HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * MISSED_HEARTBEATS_THRESHOLD 
                 try: # Remove worker from available before marking dead
                     available_workers.queue.remove(worker_id)  
                 except (ValueError, Exception) as e:
@@ -93,14 +97,15 @@ def worker_registration_listener():
                         log_message, log_level = f"Worker ID not found in queue: {str(e)}", logging.WARNING
                     log_and_print(log_message, log_level)
                 
-                # add to dead workers and delete from heartbeads and reset tasks number in worker tasks
+                # add to dead workers and delete from heartbeats and reset tasks number in worker tasks
                 dead_workers.add(worker_id)
                 del last_worker_heartbeat[worker_id]
                 worker_tasks[worker_id] = 0
                 log_and_print(f"Worker {worker_id} FAILED. --> Removed worker from available_workers and registered in dead_workers", logging.WARNING)
 
+                # check all the tasks assigned to the worker and update their states in redis and add to task queue if task itself hasnt been 'over-retried'
                 tasks_for_worker = task_assignments.get(worker_id, set())
-                for task_id in tasks_for_worker: # check all the tasks assigned to the worker and update their states in redis or add to task queue
+                for task_id in tasks_for_worker: 
                     task = redis_client.get(task_id)
                     
                     if task:
@@ -111,6 +116,7 @@ def worker_registration_listener():
                             if (task_data.get('status') == 'RUNNING' and 
                                 task_data.get('worker_id') == worker_id.decode()):
 
+                                # increment task retry count to retry it, and if > max_retries then set it as failed MAX_RETRY times
                                 task_data['retry_count'] = 1 + (task_data.get('retry_count') or 0)
                                 if task_data['retry_count'] > MAX_RETRIES:
                                     # Create worker failure error
@@ -121,15 +127,15 @@ def worker_registration_listener():
                                     )
                                     error_data = handle_task_failure(task_id, error)
                                     
-                                    # Update task with failure info
+                                    # Update task with failure info and put back in redis
                                     task_data.update({
-                                        'status': 'FAILED',
-                                        'error': error_data,
-                                        'result': serialize(error_data)
-                                    })
-                                    # task_data['status'] = 'FAILED'
+                                                        'status': 'FAILED',
+                                                        'error': error_data,
+                                                        'result': serialize(error_data)
+                                                    })
+                                    
                                     redis_client.set(task_id, serialize(task_data))
-                                else:
+                                else: # set put back in redis and task_queue wit QUEUED status to retry 
                                     task_data['status'] = 'QUEUED'
                                     redis_client.set(task_id, serialize(task_data))
                                     task_queue.put((task_id, task_data))
@@ -147,15 +153,18 @@ def worker_registration_listener():
                     del task_assignments[worker_id]
 
         time.sleep(5)
+   
+   # start thread to monitor worker health continuously
    worker_health_thread = threading.Thread(target=check_worker_health, daemon=True)
    worker_health_thread.start()
 
-   while True: # get worker messages and process if its a heartbeat or ready message
-       worker_id, _, message = socket.recv_multipart()
+   # Continuously listen for worker messages and process if its a heartbeat or ready message
+   while True: 
+       worker_id, _, message = registration_socket.recv_multipart()
        msg_data = deserialize(message.decode())
 
        if isinstance(msg_data, dict) and 'type' in msg_data:
-           if msg_data['type'] == "READY": # 
+           if msg_data['type'] == "READY": # Worker ready for tasks
                worker_capacities[worker_id] = msg_data['capacity']
                worker_tasks[worker_id] = 0
                last_worker_heartbeat[worker_id] = time.time()
@@ -163,7 +172,7 @@ def worker_registration_listener():
                    available_workers.put(worker_id)
                    log_and_print(f"\nWorker {worker_id} registered with capacity {msg_data['capacity']}\n", logging.DEBUG)
            
-           elif msg_data['type'] == "HEARTBEAT":
+           elif msg_data['type'] == "HEARTBEAT": # worker checking in hearbeats
                if worker_id not in dead_workers:
                    last_worker_heartbeat[worker_id] = time.time()
                    worker_capacities[worker_id] = msg_data['capacity']
@@ -179,9 +188,14 @@ def worker_registration_listener():
 
 
 def task_assignment_handler():
+    """Thread assigns tasks continuously to workers that are available for tasks
+        - Continuously goes through workers available and gets their remaining capacity
+        - assigns new tasks to such workers and updates task status in redis
+        - uses 'task_assignment_lock' to avoid concurrency
+    """
     try:
-        socket = context.socket(zmq.ROUTER)
-        socket.bind("tcp://*:5556")
+        tasks_socket = context.socket(zmq.ROUTER)
+        tasks_socket.bind("tcp://*:5556")
     except zmq.ZMQError as e:
         log_and_print(f"\nSocket bind failed for port 5556: {e}\n", logging.ERROR)
         return
@@ -190,11 +204,12 @@ def task_assignment_handler():
         task_id, task_data = task_queue.get()
         worker_id = available_workers.get()
 
-        with task_assignment_lock:
+        with task_assignment_lock: # Use lock to ensure its not changed while assigning task to worker
+            # get how many more tasks worker can take: available_capacity
             available_capacity = worker_capacities[worker_id] - worker_tasks[worker_id]
             tasks_to_assign = []
             
-            # Collect up to available_capacity tasks
+            # Collect up to available_capacity tasks from task_queue
             tasks_to_assign.append((task_id, task_data))
             while len(tasks_to_assign) < available_capacity and not task_queue.empty():
                 try:
@@ -203,35 +218,43 @@ def task_assignment_handler():
                 except queue.Empty:
                     break
 
-            # Assign collected tasks
+            # Assign collected tasks to worker
             for task_id, task_data in tasks_to_assign:
+
                 task_data_serialized = redis_client.get(task_id)
+
+                # skip if task is assigned to a diff worker or COMPLETED or FAILED
                 if task_data_serialized:
                     task_data = deserialize(task_data_serialized)
                     if task_data.get('status') in ["RUNNING", "COMPLETED", "FAILED"]:
                         continue
-
-                try:
-                    socket.send_multipart([worker_id, b"", serialize(task_data).encode()])
+                
+                # Assign task to worker
+                try: 
+                    # send task to worker
+                    tasks_socket.send_multipart([worker_id, b"", serialize(task_data).encode()])
                     worker_tasks[worker_id] += 1
                     
+                    # set status as RUNNING in redis
                     task_data['worker_id'] = worker_id.decode()
                     task_data['status'] = "RUNNING"
                     redis_client.set(task_id, serialize(task_data))
 
+                    # check worker into task_assignments dictionary
                     if worker_id not in task_assignments:
                         task_assignments[worker_id] = set()
                     task_assignments[worker_id].add(task_id)
 
                 except Exception as e:
                     log_and_print(f"\nError assigning Task {task_id} to Worker {worker_id}: {e}\n", logging.ERROR)
-
+            
+            # Place worker in available worker if it still hase more capacity
             if worker_tasks[worker_id] < worker_capacities[worker_id]:
                 available_workers.put(worker_id)
 
 
 def task_listener():
-    """Thread to listen for new tasks from Redis."""
+    """Thread to listen for new tasks from Redis and places them in 'task_queue'"""
     
     # Create a Redis PubSub instance and subscribe to the "Tasks" channel
     pubsub = redis_client.pubsub()
@@ -249,7 +272,6 @@ def task_listener():
 
             try:
                 # Deserialize the task data to get the original object
-
                 task_data = deserialize(task_data_serialized)
             except Exception as e:
                 # Log an error if deserialization fails
@@ -262,23 +284,26 @@ def task_listener():
 
 
 def result_listener():
-    """Thread to listen for results from workers."""
+    """Thread to listen for results from workers.
+        - Updates failed task status in redis as FAILED and MAX_RETRIES exceeded else re-enqueues task
+        - Updated successful tasks in redis as COMPLETED and removes them from 'task_assignments' dict
+    """
 
     # Bind ZMQ socket for receiving results from workers on port 5557
     try:
-        socket = context.socket(zmq.ROUTER)
-        socket.bind("tcp://*:5557")
+        results_socket = context.socket(zmq.ROUTER)
+        results_socket.bind("tcp://*:5557")
     except zmq.ZMQError as e:
         log_and_print(f"\nSocket bind failed for port 5556: {e}\n", logging.ERROR)
         return
 
     while True:
         # Poll the socket with a timeout of 1000 ms
-        if not socket.poll(1000):
+        if not results_socket.poll(1000):
             continue
 
         # Receive message parts from the socket
-        parts = socket.recv_multipart()
+        parts = results_socket.recv_multipart()
 
         # Expect 4 parts in the message (worker ID, separator, separator, message)
         if len(parts) == 4:
@@ -298,7 +323,7 @@ def result_listener():
             # Handle failed tasks and retry if allowed
             if status == "FAILED":
                 task_data = deserialize(redis_client.get(task_id))
-                task_data['retry_count'] = 1 + task_data.get('retry_count', 0) #+ 1
+                task_data['retry_count'] = 1 + task_data.get('retry_count', 0) 
 
                 # Remove the task from worker's assignment list
                 with task_assignment_lock:
