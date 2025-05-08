@@ -153,7 +153,7 @@ class MPCSFaaSClient:
             
         return metrics
     
-    def run_stress_test000(self, test_func, num_tasks: int, params=None, concurrent_tasks: int = 10, test_type="generic", num_workers: int = 1) -> Dict:
+    def run_stress_test_V0(self, test_func, num_tasks: int, params=None, concurrent_tasks: int = 10, test_type="generic", num_workers: int = 1) -> Dict:
         """Run stress test with given function and collect performance metrics"""
         # Register test function
         func_id = self.register_function(test_func)
@@ -274,7 +274,7 @@ class MPCSFaaSClient:
         plt.tight_layout()
         return fig
 
-    def plot_performance_metrics000(self, test_type="sleep"):
+    def plot_performance_metrics_V0(self, test_type="sleep"):
         """Plot performance metrics from stress tests"""
         results_list = f"{test_type}_test_results"
         if not hasattr(self, results_list):

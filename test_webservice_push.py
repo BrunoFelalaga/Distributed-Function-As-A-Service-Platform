@@ -81,17 +81,14 @@ def test_roundtrip():
     for i in range(200): # 20
 
         resp = requests.get(f"{base_url}result/{task_id}")
-        # print("here-------")
+        
         
         assert resp.status_code == 200
         assert resp.json()["task_id"] == task_id
-        # print("here-------", resp.json()['status'])
         if resp.json()['status'] in ["COMPLETED", "FAILED"]:
             s_result = resp.json()
-            # print("here-------")
             result = deserialize(deserialize(s_result['result']))
             assert result == number*2
-            # print("here-------")
             
             break
         time.sleep(0.01)
@@ -252,7 +249,7 @@ def test_concurrent_execution():
         task_ids = [f.result().json()["task_id"] for f in futures]
     
     # Verify all tasks complete successfully
-    jj = 0
+    completed_count = 0
     for task_id in task_ids:
         for _ in range(30):
             
@@ -261,7 +258,7 @@ def test_concurrent_execution():
                 result = deserialize(resp.json()['result'])
                 result = deserialize(result)
                 assert result == 0.1
-                jj += 1
+                completed_count += 1
                 break
             time.sleep(0.1)
 
@@ -512,8 +509,6 @@ def test_recursion_limit():
         if resp.json()['status'] == "FAILED":
             error_data = deserialize(resp.json()['result'])
             error_data = deserialize(error_data)
-
-            # pprint(deserialize(error_data)['message'], width=100)
 
             print("RecursionError" in deserialize(error_data)['message'])
             assert "RecursionError" in deserialize(error_data)['message']

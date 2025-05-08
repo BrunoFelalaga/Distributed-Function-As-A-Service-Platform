@@ -224,13 +224,6 @@ def bursty_workload_test(burst_size=1000):
     return bursts
 
 
-# def create_io_tests():
-#     return [
-#         TestCase("network_io", http_request_test),
-#         TestCase("db_ops", db_write_test, (1000,)),
-#         TestCase("file_io", file_write_test, (5,))
-#     ]
-
 def create_io_tests():
     return [
         TestCase("network_io", http_request_test, params=None),

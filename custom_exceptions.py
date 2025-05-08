@@ -16,13 +16,6 @@ class FunctionExecutionFailure(FaaSBaseException):
         super().__init__(f"Task {task_id} failed: {message}\nOriginal error: {str(original_error)}\n{self.traceback}", 
                         task_id)
 
-# class WorkerFailureError(FaaSBaseException):
-#     """Exception for worker failures"""
-#     def __init__(self, message: str, task_id: uuid.UUID, worker_id: str):
-#         self.worker_id = worker_id
-#         super().__init__(f"Worker {worker_id} failed while processing task {task_id}: {message}", 
-#                         task_id)
-
 # General WorkerFailureError exception for worker-specific failures
 class WorkerFailureError(FaaSBaseException):
     """Exception for worker failures"""
